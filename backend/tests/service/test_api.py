@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
+
 from fastapi.testclient import TestClient
 
 from backend.agents.state import Citation, DisputeResult, TraceEntry, Verification
 from backend.app.main import create_app
-from backend.app.services import process_run
+from backend.app.services import RedisEnqueuer, process_run
 from backend.app.storage import MemoryRunStore, RunRecord, utcnow
 
 
@@ -143,6 +145,15 @@ def test_metrics_exposes_service_metrics(stack, payload):
     assert response.status_code == 200
     assert "dispute_runs_total" in response.text
     assert "http_requests_total" in response.text
+
+
+def test_rq_job_id_is_legal():
+    """RQ rejects ':' and every character outside [A-Za-z0-9_-]."""
+    pattern = re.compile(r"[A-Za-z0-9_-]+")
+    for run_id in ("run_657cdc66e94442cdb84d7b2519152c18", "run:weird/../id", "run_" + "x" * 400):
+        job_id = RedisEnqueuer.job_id(run_id)
+        assert pattern.fullmatch(job_id), job_id
+        assert 1 <= len(job_id) <= 200
 
 
 def test_reconstruction_falls_back_to_archive_after_redis_ttl(settings, payload):

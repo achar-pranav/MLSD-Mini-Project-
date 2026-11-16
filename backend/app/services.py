@@ -66,12 +66,17 @@ class RedisEnqueuer:
         self._redis = redis.Redis.from_url(self.settings.redis_url)
         self._queue = Queue(self.settings.queue_name, connection=self._redis)
 
+    @staticmethod
+    def job_id(run_id: str) -> str:
+        """An RQ-legal job id (rq.job.JOB_ID_PATTERN is [A-Za-z0-9_-]+)."""
+        return re.sub(r"[^A-Za-z0-9_-]", "-", run_id)[:200]
+
     def enqueue(self, run_id: str) -> str:
         self._connect()
         job = self._queue.enqueue(
             "backend.worker.process_dispute_job",
             run_id,
-            job_id=f"run:{run_id}",
+            job_id=self.job_id(run_id),
             job_timeout=self.settings.job_timeout_s,
             result_ttl=600,
             failure_ttl=7 * 24 * 3600,
