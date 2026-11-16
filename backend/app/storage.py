@@ -288,6 +288,141 @@ def load_archive(run_id: str, settings: Settings) -> dict[str, Any] | None:
     return None
 
 
+def record_from_archive(payload: dict[str, Any]) -> RunRecord | None:
+    """Turn one archive file back into a RunRecord, or None if it is unusable."""
+    if not isinstance(payload, dict) or not payload.get("run_id"):
+        return None
+    fields: dict[str, Any] = {}
+    for name in FIELDS:
+        value = payload.get(name)
+        if name in {"created_at", "updated_at", "started_at", "completed_at"} and isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                value = None
+        fields[name] = value
+    if fields.get("trace") is None:
+        fields["trace"] = []
+    if not isinstance(fields.get("updated_at"), datetime):
+        fields["updated_at"] = fields.get("created_at") or utcnow()
+    if not isinstance(fields.get("created_at"), datetime):
+        return None
+    try:
+        return RunRecord(**fields)
+    except TypeError:
+        logger.warning("archive %s has an unexpected shape", payload.get("run_id"), exc_info=True)
+        return None
+
+
+def list_archives(settings: Settings, limit: int = 20) -> list[RunRecord]:
+    """Newest completed runs from the JSON archive, independent of Redis.
+
+    This is what keeps run history visible after Redis restarts or after the
+    RUN_RETENTION_S TTL expires: the files under RUN_ARCHIVE_DIR never expire.
+    """
+    root = Path(settings.run_archive_dir) if settings.run_archive_dir else None
+    if limit <= 0 or root is None or not root.exists():
+        return []
+    try:
+        directories = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
+    except OSError:
+        logger.warning("could not list archive root %s", root, exc_info=True)
+        return []
+
+    records: list[RunRecord] = []
+    for directory in directories:
+        try:
+            files = sorted(
+                (p for p in directory.iterdir() if p.suffix == ".json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            logger.warning("could not list archive directory %s", directory, exc_info=True)
+            continue
+        for path in files:
+            if not _ARCHIVE_RUN_ID.match(path.stem):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                logger.warning("unreadable archive %s", path, exc_info=True)
+                continue
+            record = record_from_archive(payload)
+            if record is not None:
+                records.append(record)
+            if len(records) >= limit:
+                return records
+    return records
+
+
+_history_lock = threading.Lock()
+
+
+def append_request_history(record: RunRecord, settings: Settings) -> Path | None:
+    """Append the submitted request to an append-only JSONL log.
+
+    This is the analyst's query history: it records what was typed, not just the
+    result, so a case can be replayed later without retyping it.  Append-only and
+    never expired; a failure here is logged and never fails the submission.
+    """
+    raw = (settings.run_history_file or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    entry = {
+        "submitted_at": record.created_at.isoformat(),
+        "run_id": record.run_id,
+        "correlation_id": record.correlation_id,
+        "request": record.request,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _history_lock, open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, default=_json_default, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.warning("could not append request history to %s", path, exc_info=True)
+        return None
+    return path
+
+
+def read_request_history(settings: Settings, limit: int = 50) -> list[dict[str, Any]]:
+    """The newest ``limit`` submitted requests, newest first."""
+    raw = (settings.run_history_file or "").strip()
+    if limit <= 0 or not raw:
+        return []
+    path = Path(raw)
+    if not path.is_file():
+        return []
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        with _history_lock, open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        logger.warning("could not read request history %s", path, exc_info=True)
+        return []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed request-history line", exc_info=True)
+            continue
+        run_id = entry.get("run_id")
+        if not isinstance(run_id, str) or run_id in seen:
+            continue
+        if not isinstance(entry.get("request"), dict):
+            continue
+        seen.add(run_id)
+        entries.append(entry)
+        if len(entries) >= limit:
+            break
+    return entries
+
+
 def archive_record(record: RunRecord, settings: Settings) -> Path:
     """Write the complete run (request, result, trace) as one JSON file."""
     root = Path(settings.run_archive_dir) if settings.run_archive_dir else None

@@ -120,6 +120,20 @@ class RunList(BaseModel):
     count: int
 
 
+class RequestHistoryEntry(BaseModel):
+    """One query the analyst submitted, kept so it can be replayed."""
+
+    submitted_at: datetime
+    run_id: str
+    correlation_id: str | None = None
+    request: DisputeRequest
+
+
+class RequestHistory(BaseModel):
+    requests: list[RequestHistoryEntry]
+    count: int
+
+
 class RunReconstruction(BaseModel):
     """D5: everything needed to explain one run after the fact."""
 

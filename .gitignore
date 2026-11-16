@@ -12,6 +12,7 @@ __pycache__/
 
 # Runtime artefacts
 data/runs/
+data/requests.jsonl
 loadtest/results/
 *.log
 *.pid

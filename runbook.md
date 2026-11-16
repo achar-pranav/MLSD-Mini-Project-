@@ -150,6 +150,11 @@ for 7 days (`RUN_RETENTION_S`).
 `GET /runs?limit=20` powers the UI's recent-runs list. `include_trace=false`
 returns a smaller result body.
 
+`GET /requests?limit=50` returns the queries the analyst submitted, newest first,
+from the append-only `RUN_HISTORY_FILE` (`data/requests.jsonl` by default). The UI
+uses it as "Saved queries" so a case can be reloaded into the form instead of
+being retyped. Replayed idempotent submissions are not logged twice.
+
 ## 6. Scaling and pacing
 
 The worker uses RQ's `SimpleWorker`, so one run executes per worker process and
@@ -224,18 +229,23 @@ message and always carry `run_id` and `correlation_id`. Use `docker compose logs
 
 ## 8. D5 run reconstruction
 
-Three layers:
+Four layers:
 
 1. `result.trace` — the per-step list returned with the result.
 2. Redis hash `dispute:run:<run_id>` — status, request, result, trace, timings,
    worker, duration. TTL `RUN_RETENTION_S`.
 3. JSON archive — `$RUN_ARCHIVE_DIR/YYYY-MM-DD/<run_id>.json`, written
    atomically by the worker. Contains the request, result, trace, versions and
-   `archived_at`.
+   `archived_at`. Never expires.
+4. Query history — `$RUN_HISTORY_FILE` (`data/requests.jsonl`), appended by the
+   API at submit time. It keeps what the analyst typed, so a case can be
+   replayed even when both Redis and the archive are empty. Never expires.
 
-`GET /runs/{run_id}/reconstruction` returns the request, result, trace and
-service metadata (prompt version, graph budget/seed config). If a run is older
-than the Redis TTL, read the archive file.
+`GET /runs`, `GET /runs/{run_id}` and `GET /runs/{run_id}/trace` read Redis and
+fall back to the archive, so run history stays visible after a Redis restart or
+after the TTL. `GET /runs/{run_id}/reconstruction` adds service metadata (prompt
+version, graph budget/seed config) and reports `service.source` as `redis` or
+`archive`. `GET /requests` serves the query history.
 
 ## 9. Failure handling
 

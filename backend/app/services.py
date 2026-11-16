@@ -19,6 +19,7 @@ from backend.app.schemas import DisputeRequest, RunSummary
 from backend.app.storage import (
     RunRecord,
     RunStore,
+    append_request_history,
     archive_record,
     build_store,
     utcnow,
@@ -157,6 +158,8 @@ class RunService:
 
         updated = self.store.update(run_id, queue_job_id=job_id)
         QUEUE_SUBMITTED.inc()
+        # Durable analyst query history: keep the request even after Redis forgets it.
+        append_request_history(updated or record, self.settings)
         return updated or record, False
 
     def get(self, run_id: str) -> RunRecord | None:

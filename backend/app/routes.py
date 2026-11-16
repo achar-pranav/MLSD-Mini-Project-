@@ -10,6 +10,8 @@ from backend.app.schemas import (
     DisputeRequest,
     Health,
     Readiness,
+    RequestHistory,
+    RequestHistoryEntry,
     RunList,
     RunReconstruction,
     RunSubmission,
@@ -23,13 +25,27 @@ from backend.app.services import (
     reconstruction,
     summarise,
 )
-from backend.app.storage import load_archive
+from backend.app.storage import (
+    list_archives,
+    load_archive,
+    read_request_history,
+    record_from_archive,
+)
 
 router = APIRouter()
 
 
 def _service(request: Request) -> RunService:
     return request.app.state.service
+
+
+def _record(service: RunService, run_id: str) -> Any:
+    """Redis first, then the JSON archive (history survives Redis restarts)."""
+    record = service.get(run_id)
+    if record is not None:
+        return record
+    payload = load_archive(run_id, service.settings)
+    return record_from_archive(payload) if payload else None
 
 
 def _view(record: Any, include_trace: bool) -> RunView:
@@ -90,13 +106,42 @@ def submit_dispute(
     )
 
 
+@router.get(
+    "/requests",
+    response_model=RequestHistory,
+    summary="Submitted queries, newest first (append-only history file)",
+)
+def list_requests(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=500),
+) -> RequestHistory:
+    """What the analyst typed, kept even after the run leaves Redis."""
+    entries: list[RequestHistoryEntry] = []
+    for entry in read_request_history(_service(request).settings, limit):
+        try:
+            entries.append(RequestHistoryEntry.model_validate(entry))
+        except ValueError:
+            continue
+    return RequestHistory(requests=entries, count=len(entries))
+
+
 @router.get("/runs", response_model=RunList, summary="Recent runs")
 def list_runs(
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
 ) -> RunList:
-    records = _service(request).recent(limit)
-    runs: list[RunSummary] = [summarise(record) for record in records]
+    service = _service(request)
+    records = service.recent(limit)
+    if len(records) < limit:
+        seen = {record.run_id for record in records}
+        for archived in list_archives(service.settings, limit):
+            if archived.run_id not in seen:
+                records.append(archived)
+                seen.add(archived.run_id)
+            if len(records) >= limit:
+                break
+    records.sort(key=lambda record: record.created_at, reverse=True)
+    runs: list[RunSummary] = [summarise(record) for record in records[:limit]]
     return RunList(runs=runs, count=len(runs))
 
 
@@ -106,7 +151,7 @@ def get_run(
     request: Request,
     include_trace: bool = Query(default=True, description="Set false for a smaller response."),
 ) -> RunView:
-    record = _service(request).get(run_id)
+    record = _record(_service(request), run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="run not found")
     return _view(record, include_trace)
@@ -118,7 +163,7 @@ def get_run(
     summary="The per-step trace for D5 run reconstruction",
 )
 def get_trace(run_id: str, request: Request) -> list[TraceEntry]:
-    record = _service(request).get(run_id)
+    record = _record(_service(request), run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="run not found")
     return [TraceEntry.model_validate(item) for item in record.trace]
@@ -131,29 +176,14 @@ def get_trace(run_id: str, request: Request) -> list[TraceEntry]:
 )
 def get_reconstruction(run_id: str, request: Request) -> RunReconstruction:
     service = _service(request)
-    record = service.get(run_id)
-    if record is not None:
-        return RunReconstruction.model_validate(reconstruction(record, service.settings))
-
-    archived = load_archive(run_id, service.settings)
-    if archived is not None:
-        result = archived.get("result") or {}
-        run_config = {}
-        for entry in archived.get("trace") or []:
-            if entry.get("type") == "node" and entry.get("name") == "run.config":
-                run_config = entry.get("detail") or {}
-                break
-        archived["service"] = {
-            "api_version": archived.get("api_version"),
-            "service_version": archived.get("service_version"),
-            "environment": service.settings.environment,
-            "prompt_version": result.get("prompt_version"),
-            "graph_config": run_config,
-            "archive_dir": service.settings.run_archive_dir,
-            "source": "archive",
-        }
-        return RunReconstruction.model_validate(archived)
-    raise HTTPException(status_code=404, detail="run not found")
+    record = _record(service, run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    view = reconstruction(record, service.settings)
+    if service.get(run_id) is None:
+        # Redis no longer has it (TTL expired or Redis restarted): say so.
+        view["service"]["source"] = "archive"
+    return RunReconstruction.model_validate(view)
 
 
 @router.get("/health", response_model=Health, summary="Liveness")

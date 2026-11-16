@@ -65,6 +65,36 @@ def test_submit_returns_202_and_enqueues(stack, payload):
     assert response.headers["location"] == f"/runs/{body['run_id']}"
 
 
+def test_submitted_query_is_kept_in_history(stack, payload):
+    """The analyst's input is logged, not just the result, so it can be replayed."""
+    client, _, _, settings = stack
+    run_id = client.post("/disputes", json=payload).json()["run_id"]
+
+    history = client.get("/requests").json()
+    assert history["count"] == 1
+    entry = history["requests"][0]
+    assert entry["run_id"] == run_id
+    assert entry["request"]["narrative"] == payload["narrative"]
+    assert entry["request"]["amount"] == payload["amount"]
+
+    from pathlib import Path
+
+    lines = Path(settings.run_history_file).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+    # Survives a store that knows nothing (Redis restarted / TTL expired).
+    empty = create_app(settings=settings, store=MemoryRunStore(), enqueuer=FailingEnqueuer())
+    with TestClient(empty) as reopened:
+        assert reopened.get("/requests").json()["count"] == 1
+
+
+def test_idempotent_replay_does_not_duplicate_history(stack, payload):
+    client, _, _, _ = stack
+    client.post("/disputes", json=payload, headers={"Idempotency-Key": "same"})
+    client.post("/disputes", json=payload, headers={"Idempotency-Key": "same"})
+    assert client.get("/requests").json()["count"] == 1
+
+
 def test_d1_validation_rejects_before_enqueue(stack, payload):
     client, _, enqueuer, _ = stack
     bad = dict(payload, amount=0)
@@ -175,16 +205,28 @@ def test_reconstruction_falls_back_to_archive_after_redis_ttl(settings, payload)
             escalation={"reason_code": "out_of_corpus", "note": "not covered"},
             verification=Verification(passed=False, attempts=1),
             prompt_version="analysis_v1.4+verification_v1.1",
+            trace=[TraceEntry(type="llm", name="analysis", latency_ms=10)],
         ),
     )
-    empty_store = MemoryRunStore()
+    empty_store = MemoryRunStore()   # simulates Redis after a restart / TTL expiry
     app = create_app(settings=settings, store=empty_store, enqueuer=FailingEnqueuer())
     with TestClient(app) as client:
         response = client.get("/runs/run_archived/reconstruction")
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["service"]["source"] == "archive"
-    assert body["result"]["escalation"]["reason_code"] == "out_of_corpus"
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["service"]["source"] == "archive"
+        assert body["result"]["escalation"]["reason_code"] == "out_of_corpus"
+
+        # Run history must survive an empty Redis: list, detail and trace.
+        listed = client.get("/runs").json()
+        assert listed["count"] == 1
+        assert listed["runs"][0]["run_id"] == "run_archived"
+        detail = client.get("/runs/run_archived")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["status"] == "completed"
+        trace = client.get("/runs/run_archived/trace")
+        assert trace.status_code == 200
+        assert trace.json()[0]["type"] == "llm"
 
 
 def test_queue_outage_is_503_and_run_is_failed(settings, payload):

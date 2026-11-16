@@ -33,6 +33,7 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         run_store="memory",
         run_archive_dir=str(tmp_path / "runs"),
+        run_history_file=str(tmp_path / "requests.jsonl"),
         index_dir=str(index),
         cors_origins=("*",),
         otel_endpoint="",

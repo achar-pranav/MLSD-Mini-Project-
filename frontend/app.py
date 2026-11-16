@@ -197,6 +197,32 @@ with st.sidebar:
     st.write("API:", "🟢 healthy" if healthy else "🔴 unreachable")
     st.caption(API_BASE_URL)
     st.divider()
+    st.header("Saved queries")
+    try:
+        history = httpx.get(
+            f"{API_BASE_URL}/requests", params={"limit": 20}, timeout=5,
+        ).json()
+        saved = history.get("requests", [])
+    except (httpx.HTTPError, ValueError):
+        saved = []
+
+    def saved_label(entry: dict) -> str:
+        request = entry.get("request") or {}
+        text = (request.get("narrative") or "").strip().replace("\n", " ")
+        return f"{str(entry.get('submitted_at'))[:16]} · {text[:38]}…"
+
+    if saved:
+        pick = st.selectbox(
+            "Reuse a query", options=range(len(saved)), format_func=lambda i: saved_label(saved[i]),
+        )
+        if st.button("Load into form", use_container_width=True):
+            st.session_state["prefill"] = saved[pick]["request"]
+            st.session_state["prefill_nonce"] = int(st.session_state.get("prefill_nonce", 0)) + 1
+            st.rerun()
+    else:
+        st.caption("No saved queries yet.")
+
+    st.divider()
     st.header("Recent runs")
     try:
         recent = httpx.get(f"{API_BASE_URL}/runs", params={"limit": 10}, timeout=5).json()
@@ -226,26 +252,67 @@ with st.sidebar:
 st.title("Card Dispute Triage")
 st.caption("Two-agent review over RBI and SBI provisions. Recommendations are verified; escalations are explicit.")
 
-with st.form("dispute"):
+prefill = st.session_state.get("prefill") or {}
+nonce = int(st.session_state.get("prefill_nonce", 0))
+
+
+def _prefill_date(value: object, fallback: date) -> date:
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+account_options = ["savings", "current", "credit_card", "other"]
+channel_default = prefill.get("channel") if prefill.get("channel") in CHANNELS else CHANNELS[0]
+account_default = (
+    prefill.get("account_type") if prefill.get("account_type") in account_options else "savings"
+)
+
+with st.form(f"dispute_{nonce}"):
     narrative = st.text_area(
         "What happened? (the customer's own words)",
+        value=prefill.get("narrative") or "",
         height=150,
         placeholder="A card-not-present charge I never made appeared on my card...",
+        key=f"narrative_{nonce}",
     )
     left, middle, right = st.columns(3)
-    channel = left.selectbox("Channel", CHANNELS)
-    amount = middle.number_input("Amount (INR)", min_value=1.0, value=4999.0, step=100.0)
+    channel = left.selectbox(
+        "Channel", CHANNELS, index=CHANNELS.index(channel_default), key=f"channel_{nonce}",
+    )
+    amount = middle.number_input(
+        "Amount (INR)", min_value=1.0, value=float(prefill.get("amount") or 4999.0),
+        step=100.0, key=f"amount_{nonce}",
+    )
     account_type = right.selectbox(
-        "Account type", ["savings", "current", "credit_card", "other"],
+        "Account type", account_options, index=account_options.index(account_default),
+        key=f"account_{nonce}",
     )
-    merchant = st.text_input("Merchant (optional)")
-    alert_known = st.checkbox("I know when the bank's alert reached the customer", value=True)
+    merchant = st.text_input(
+        "Merchant (optional)", value=prefill.get("merchant") or "", key=f"merchant_{nonce}",
+    )
+    alert_known = st.checkbox(
+        "I know when the bank's alert reached the customer",
+        value=bool(prefill.get("communication_date")), key=f"alert_{nonce}",
+    )
     d1, d2, d3 = st.columns(3)
-    transaction_date = d1.date_input("Transaction date", value=date.today() - timedelta(days=10))
-    communication_date = d2.date_input(
-        "Bank alert date", value=date.today() - timedelta(days=10), disabled=not alert_known,
+    transaction_date = d1.date_input(
+        "Transaction date",
+        value=_prefill_date(prefill.get("transaction_date"), date.today() - timedelta(days=10)),
+        key=f"td_{nonce}",
     )
-    reported_date = d3.date_input("Reported date", value=date.today())
+    communication_date = d2.date_input(
+        "Bank alert date",
+        value=_prefill_date(prefill.get("communication_date"), date.today() - timedelta(days=10)),
+        disabled=not alert_known,
+        key=f"cd_{nonce}",
+    )
+    reported_date = d3.date_input(
+        "Reported date",
+        value=_prefill_date(prefill.get("reported_date"), date.today()),
+        key=f"rd_{nonce}",
+    )
     submitted = st.form_submit_button("Submit dispute", type="primary")
 
 if submitted:

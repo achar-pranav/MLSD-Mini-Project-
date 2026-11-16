@@ -67,6 +67,9 @@ class Settings:
     run_store: str = "redis"           # "redis" (deployments) or "memory" (tests)
     run_retention_s: int = 7 * 24 * 3600
     run_archive_dir: str = "data/runs"
+    # Append-only log of every submitted request, so the analyst can reuse a
+    # previous query without retyping it.  Never expires.
+    run_history_file: str = "data/requests.jsonl"
     job_timeout_s: int = 240
 
     # Worker
@@ -101,6 +104,7 @@ class Settings:
             run_store=store,
             run_retention_s=_int("RUN_RETENTION_S", 7 * 24 * 3600),
             run_archive_dir=_str("RUN_ARCHIVE_DIR", "data/runs"),
+            run_history_file=_str("RUN_HISTORY_FILE", "data/requests.jsonl"),
             job_timeout_s=_int("RUN_JOB_TIMEOUT_S", 240),
             worker_metrics_addr=_str("WORKER_METRICS_ADDR", "0.0.0.0"),
             worker_metrics_port=_int("WORKER_METRICS_PORT", 9100),
