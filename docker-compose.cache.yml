@@ -1,0 +1,27 @@
+# Optional cache-volume overlay (alternative to baking the model at build time).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cache.yml up -d --build
+#
+# First start: HF_HUB_OFFLINE=0 lets the worker download the embedding model
+# from EMBEDDING_MODEL into the named volume.  After it is cached, set
+# HF_HUB_OFFLINE=1 in .env and restart:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cache.yml up -d
+#
+# Do NOT combine this overlay with a model baked into the image: mounting an
+# empty named volume over /models/hf hides the baked cache.
+services:
+  api:
+    volumes:
+      - hf_cache:/models/hf
+    environment:
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+
+  worker:
+    volumes:
+      - hf_cache:/models/hf
+    environment:
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+
+volumes:
+  hf_cache:

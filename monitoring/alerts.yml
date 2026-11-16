@@ -1,0 +1,88 @@
+groups:
+  - name: dispute-service
+    rules:
+      - alert: DisputeApiDown
+        expr: absent(up{job="dispute-api"}) or up{job="dispute-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dispute API is down"
+          description: "Prometheus cannot scrape the API for 2 minutes."
+
+      - alert: DisputeWorkerDown
+        expr: absent(up{job="dispute-worker"}) or up{job="dispute-worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No dispute worker is scrapeable"
+          description: "Runs will sit in the queue. Check the worker logs and Redis."
+
+      - alert: DisputeRunFailureRate
+        expr: |
+          (
+            sum(rate(dispute_runs_total{outcome="failed"}[10m]))
+            /
+            clamp_min(sum(rate(dispute_runs_total[10m])), 1e-9)
+          ) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Infrastructure run failure rate above 1%"
+          description: "More than 1% of finished runs failed without a DisputeResult."
+
+      - alert: DisputeRunP95AboveSLO
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(dispute_run_duration_seconds_bucket[10m])) by (le)
+          ) > 120
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 run duration is above the declared 120 s SLO"
+          description: "See monitoring/SLO.md. Check provider latency, queue wait and worker count."
+
+      - alert: DisputeProviderUnavailableSpike
+        expr: increase(dispute_runs_total{reason_code="provider_unavailable"}[10m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Provider-unavailable escalations are spiking"
+          description: "More than 3 runs in 10 minutes escalated because the LLM provider failed."
+
+      - alert: DisputeVerificationFailureSpike
+        expr: |
+          (
+            sum(rate(dispute_runs_total{reason_code="verification_failed"}[15m]))
+            /
+            clamp_min(sum(rate(dispute_runs_total[15m])), 1e-9)
+          ) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Verification failure rate above 10%"
+          description: "The model is producing answers the verifier cannot support; inspect traces."
+
+      - alert: DisputeQueueBacklog
+        expr: max(dispute_queue_depth) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dispute queue backlog is above 20"
+          description: "Add workers or check provider pacing. LLM_MIN_INTERVAL_S is per worker process."
+
+      - alert: DisputeArchiveFailures
+        expr: increase(dispute_archive_failures_total[30m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Run JSON archive is failing"
+          description: "Redis still has the run while its TTL lasts; check the run_archive volume."

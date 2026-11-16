@@ -1,0 +1,4 @@
+# Test/dev extras for the service layer (not needed in the runtime image).
+-r requirements-service.txt
+pytest>=8.0
+pyyaml>=6.0

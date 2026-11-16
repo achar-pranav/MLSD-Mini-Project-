@@ -1,0 +1,197 @@
+name: dispute-triage
+
+# --------------------------------------------------------------------------- #
+# Shared environment.  Values come from the untracked .env file (Compose reads
+# it automatically) or from the shell.  Nothing secret is committed here.
+# --------------------------------------------------------------------------- #
+x-build: &build
+  context: .
+  args:
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+
+x-service-env: &service-env
+  REDIS_URL: redis://redis:6379/0
+  QUEUE_NAME: ${QUEUE_NAME:-dispute-runs}
+  RUN_STORE: redis
+  RUN_RETENTION_S: ${RUN_RETENTION_S:-604800}
+  RUN_ARCHIVE_DIR: /data/runs
+  RUN_JOB_TIMEOUT_S: ${RUN_JOB_TIMEOUT_S:-240}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  ENVIRONMENT: ${ENVIRONMENT:-docker}
+  SERVICE_VERSION: ${SERVICE_VERSION:-dev}
+  API_VERSION: ${API_VERSION:-1}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8501}
+  MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-65536}
+  OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-dispute-triage}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+  OTEL_CONSOLE: ${OTEL_CONSOLE:-off}
+  WORKER_METRICS_ADDR: 0.0.0.0
+  WORKER_METRICS_PORT: ${WORKER_METRICS_PORT:-9100}
+  WORKER_PRELOAD_RETRIEVER: ${WORKER_PRELOAD_RETRIEVER:-true}
+  INDEX_DIR: /app/data/index
+  HF_HOME: /models/hf
+  HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
+
+x-agent-env: &agent-env
+  LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_FALLBACK_BASE_URL: ${LLM_FALLBACK_BASE_URL:-}
+  LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-}
+  LLM_FALLBACK_API_KEY: ${LLM_FALLBACK_API_KEY:-}
+  LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-20}
+  LLM_MAX_ATTEMPTS: ${LLM_MAX_ATTEMPTS:-3}
+  LLM_BACKOFF_BASE_S: ${LLM_BACKOFF_BASE_S:-0.5}
+  LLM_BACKOFF_MAX_S: ${LLM_BACKOFF_MAX_S:-8}
+  LLM_BREAKER_THRESHOLD: ${LLM_BREAKER_THRESHOLD:-5}
+  LLM_BREAKER_RESET_S: ${LLM_BREAKER_RESET_S:-30}
+  LLM_MIN_INTERVAL_S: ${LLM_MIN_INTERVAL_S:-0}
+  LLM_COST_PER_1K_PROMPT: ${LLM_COST_PER_1K_PROMPT:-0}
+  LLM_COST_PER_1K_COMPLETION: ${LLM_COST_PER_1K_COMPLETION:-0}
+  LLM_FAKE_SCENARIO: ${LLM_FAKE_SCENARIO:-default}
+  AGENT_MAX_MODEL_CALLS: ${AGENT_MAX_MODEL_CALLS:-14}
+  AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-16}
+  AGENT_WALL_CLOCK_S: ${AGENT_WALL_CLOCK_S:-60}
+  AGENT_SEED_PROVISIONS: ${AGENT_SEED_PROVISIONS:-on}
+  EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-sentence-transformers}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+  EMBEDDING_MAX_SEQ_LENGTH: ${EMBEDDING_MAX_SEQ_LENGTH:-512}
+  EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+  EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX:-}
+  EMBEDDING_DOC_PREFIX: ${EMBEDDING_DOC_PREFIX:-}
+  EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+  CORPUS_DIR: /app/data/corpus
+  SEARCH_TOP_K: ${SEARCH_TOP_K:-5}
+  SEARCH_MIN_SCORE: ${SEARCH_MIN_SCORE:-0}
+
+services:
+  redis:
+    image: redis:7.4.2-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: *build
+    command: ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    environment:
+      <<: *service-env
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/index:/app/data/index:ro
+      - run_archive:/data/runs
+    depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  worker:
+    build: *build
+    command: ["python", "-m", "backend.worker"]
+    restart: unless-stopped
+    environment:
+      <<: [*service-env, *agent-env]
+    expose:
+      - "9100"
+    volumes:
+      - ./data/index:/app/data/index:ro
+      - run_archive:/data/runs
+    depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s   # first start may download the embedding model
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: ${FRONTEND_API_BASE_URL:-http://api:8000}
+      POLL_TIMEOUT_S: ${POLL_TIMEOUT_S:-180}
+      POLL_INTERVAL_S: ${POLL_INTERVAL_S:-2}
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP HTTP
+      - "4317:4317"     # OTLP gRPC
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+      - worker
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dispute-service.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  run_archive:

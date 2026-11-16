@@ -1,0 +1,35 @@
+# Load-test overlay:
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build
+#
+# The stub speaks the OpenAI chat-completions protocol and reuses Member 2's
+# ScriptedAgents, so it returns a tool call and then a final JSON answer that
+# the real graph accepts.  It is never used by the default compose file.
+services:
+  stub-llm:
+    build:
+      context: .
+      dockerfile: loadtest/Dockerfile
+    command: ["uvicorn", "loadtest.stub_llm:app", "--host", "0.0.0.0", "--port", "9000"]
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    environment:
+      LLM_PROVIDER: openai
+      LLM_BASE_URL: http://stub-llm:9000/v1
+      LLM_MODEL: stub
+      LLM_API_KEY: stub
+      LLM_MIN_INTERVAL_S: "0"
+      LLM_MAX_ATTEMPTS: "1"
+      LLM_TIMEOUT_S: "20"
+    depends_on:
+      stub-llm:
+        condition: service_healthy

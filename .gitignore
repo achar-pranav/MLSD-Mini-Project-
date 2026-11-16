@@ -1,0 +1,22 @@
+.env
+.env.*
+!.env.example
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime artefacts
+data/runs/
+loadtest/results/
+*.log
+*.pid
+
+# Accidental nested checkout
+MLSD-Mini-Project-/
+
+.DS_Store
