@@ -205,7 +205,46 @@ cd ~/code/MLSD-Mini-Project-
 
 ---
 
-## 8. Where the other docs are
+## 8. Run the whole stack in Docker (optional)
+
+Same app, plus Prometheus, Grafana and Jaeger, with one command. Useful when you
+want the dashboards, not just the demo.
+
+```bash
+# one-time: allow your user to talk to the daemon
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"      # then log out and back in
+
+cd ~/code/MLSD-Mini-Project-
+docker compose up -d --build
+docker compose ps
+docker compose logs -f worker        # wait for "worker listening"
+```
+
+| What | URL |
+|---|---|
+| Analyst console | http://localhost:8501 |
+| API docs | http://localhost:8000/docs |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000 (`admin` / `admin`) |
+| Jaeger | http://localhost:16686 |
+
+The API and worker run as **your UID** and bind-mount `./data` at `/data`, so the
+archive (`data/runs/`) and query history (`data/requests.jsonl`) are the same
+files as in the local setup. Runs you already have still appear in the console.
+
+Stop (keeps `./data` and the Redis volume):
+
+```bash
+docker compose down
+```
+
+After changing code: `docker compose up -d --build`.
+If `docker` still says permission denied in a shell, run `newgrp docker` there.
+
+---
+
+## 9. Where the other docs are
 
 - `runbook.md` — operations, scaling, failure handling, API reference
 - `monitoring/SLO.md` — the declared SLOs

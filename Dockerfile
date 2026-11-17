@@ -21,10 +21,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt backend/requirements.txt requirements-service.txt ./
-RUN pip install --no-cache-dir \
-        -r requirements.txt \
-        -r backend/requirements.txt \
+# Different basenames: two files called requirements.txt would overwrite each other.
+COPY requirements.txt ./requirements-root.txt
+COPY backend/requirements.txt ./requirements-agents.txt
+COPY requirements-service.txt ./requirements-service.txt
+# CPU-only torch first: sentence-transformers would otherwise pull the CUDA
+# build plus several GB of NVIDIA wheels into the image.
+RUN pip install --no-cache-dir --retries 10 --timeout 300 \
+        --index-url https://download.pytorch.org/whl/cpu torch
+RUN pip install --no-cache-dir --retries 10 --timeout 300 \
+        -r requirements-root.txt \
+        -r requirements-agents.txt \
         -r requirements-service.txt
 
 # Optional: bake the embedding model into the image.  Pass the model id from

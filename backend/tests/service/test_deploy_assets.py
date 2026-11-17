@@ -15,7 +15,10 @@ def test_compose_defines_the_whole_service():
         assert name in services
     assert "python" in " ".join(services["worker"]["command"])
     assert "./data/index:/app/data/index:ro" in services["worker"]["volumes"]
-    assert "run_archive:/data/runs" in services["worker"]["volumes"]
+    # Archives and query history live on the host ./data directory.
+    assert "./data:/data" in services["worker"]["volumes"]
+    assert services["worker"]["environment"]["RUN_ARCHIVE_DIR"] == "/data/runs"
+    assert services["worker"]["environment"]["RUN_HISTORY_FILE"] == "/data/requests.jsonl"
 
 
 def test_loadtest_overlay_points_worker_at_stub():

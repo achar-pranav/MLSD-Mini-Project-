@@ -15,8 +15,8 @@ x-service-env: &service-env
   RUN_STORE: redis
   RUN_RETENTION_S: ${RUN_RETENTION_S:-604800}
   RUN_ARCHIVE_DIR: /data/runs
-  # Keep the query history on the same persistent volume as the archives.
-  RUN_HISTORY_FILE: /data/runs/requests.jsonl
+  # Same layout as a local run; ./data is bind-mounted below.
+  RUN_HISTORY_FILE: /data/requests.jsonl
   RUN_JOB_TIMEOUT_S: ${RUN_JOB_TIMEOUT_S:-240}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   ENVIRONMENT: ${ENVIRONMENT:-docker}
@@ -90,9 +90,11 @@ services:
       API_PORT: "8000"
     ports:
       - "8000:8000"
+    # Run as the repo owner so writes to the bind-mounted ./data work on Linux.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     volumes:
       - ./data/index:/app/data/index:ro
-      - run_archive:/data/runs
+      - ./data:/data
     depends_on:
       redis:
         condition: service_healthy
@@ -113,9 +115,10 @@ services:
       <<: [*service-env, *agent-env]
     expose:
       - "9100"
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     volumes:
       - ./data/index:/app/data/index:ro
-      - run_archive:/data/runs
+      - ./data:/data
     depends_on:
       redis:
         condition: service_healthy
@@ -134,7 +137,8 @@ services:
       context: ./frontend
     restart: unless-stopped
     environment:
-      API_BASE_URL: ${FRONTEND_API_BASE_URL:-http://api:8000}
+      # Container-to-container address. Do not use the host's localhost here.
+      API_BASE_URL: http://api:8000
       POLL_TIMEOUT_S: ${POLL_TIMEOUT_S:-180}
       POLL_INTERVAL_S: ${POLL_INTERVAL_S:-2}
     ports:
@@ -196,4 +200,3 @@ volumes:
   redis_data:
   prometheus_data:
   grafana_data:
-  run_archive:
